@@ -63,8 +63,18 @@ dans le patch (`APC_export.json`).
 
 - Le bouton "Démarrer l'audio" est nécessaire : les navigateurs interdisent
   de lancer du son sans geste explicite de l'utilisateur.
-- Un petit clavier de test envoie des notes MIDI (do4–do5) au device pour
-  déclencher l'enveloppe ADSR — pratique pour tester les réglages sans
-  contrôleur MIDI branché.
-- Si tu ajoutes un contrôleur MIDI externe, tu peux router `navigator.requestMIDIAccess()`
-  vers `device.scheduleEvent(new MIDIEvent(...))` dans `rnbo-ui-kit.js`.
+- Un vrai clavier de piano (dessiné en SVG, touches blanches/noires,
+  cliquable et glissable) envoie des notes MIDI au device pour déclencher
+  l'enveloppe ADSR — pratique pour tester sans contrôleur MIDI branché.
+- Un sélecteur "Entrée MIDI" apparaît automatiquement (Web MIDI API) et
+  liste les périphériques MIDI connectés à l'ordinateur ; choisis-en un
+  pour jouer avec un vrai clavier/contrôleur. Fonctionne sur Chrome/Edge ;
+  pas encore supporté par Firefox/Safari, auquel cas seul le clavier à
+  l'écran est disponible.
+
+## Piège corrigé (à ne pas réintroduire)
+
+`device.parametersById` est une **Map**, pas un objet : il faut
+`device.parametersById.get(paramId)`, jamais `parametersById[paramId]`
+(qui renvoie silencieusement `undefined`, sans erreur — c'est ce qui
+causait des sections vides sans aucun contrôle visible).
