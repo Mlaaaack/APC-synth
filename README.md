@@ -61,20 +61,39 @@ dans le patch (`APC_export.json`).
 
 ## Notes techniques
 
-- Le bouton "Démarrer l'audio" est nécessaire : les navigateurs interdisent
-  de lancer du son sans geste explicite de l'utilisateur.
+- Le patch se charge et l'interface (sliders, sélecteur MIDI, clavier)
+  se construit **immédiatement** à l'ouverture de la page, sans clic
+  préalable. Seul le son reste en pause tant qu'on n'a pas cliqué sur le
+  bouton **⏻ ON/OFF** en haut à droite — c'est une contrainte des
+  navigateurs (impossible de démarrer un AudioContext sans geste
+  utilisateur), pas un choix de design. Tourner les potards fonctionne
+  même avant d'appuyer sur ON.
 - Un vrai clavier de piano (dessiné en SVG, touches blanches/noires,
-  cliquable et glissable) envoie des notes MIDI au device pour déclencher
-  l'enveloppe ADSR — pratique pour tester sans contrôleur MIDI branché.
+  cliquable et glissable) envoie des notes MIDI au device — pratique
+  pour tester sans contrôleur MIDI branché.
 - Un sélecteur "Entrée MIDI" apparaît automatiquement (Web MIDI API) et
-  liste les périphériques MIDI connectés à l'ordinateur ; choisis-en un
-  pour jouer avec un vrai clavier/contrôleur. Fonctionne sur Chrome/Edge ;
-  pas encore supporté par Firefox/Safari, auquel cas seul le clavier à
-  l'écran est disponible.
+  liste les périphériques MIDI connectés ; un bouton **↻** à côté permet
+  de réactualiser la liste si tu branches un clavier après avoir ouvert
+  la page. Fonctionne sur Chrome/Edge ; pas encore supporté par
+  Firefox/Safari, auquel cas seul le clavier à l'écran est disponible.
+- Chaque paramètre du patch est lu directement depuis le device RNBO
+  (min, max, valeur initiale, unité, liste d'énum) — rien n'est codé en
+  dur, donc si tu changes une borne côté Max, l'interface web suit
+  automatiquement au prochain export.
 
-## Piège corrigé (à ne pas réintroduire)
+## Pièges corrigés (à ne pas réintroduire)
 
-`device.parametersById` est une **Map**, pas un objet : il faut
-`device.parametersById.get(paramId)`, jamais `parametersById[paramId]`
-(qui renvoie silencieusement `undefined`, sans erreur — c'est ce qui
-causait des sections vides sans aucun contrôle visible).
+- `device.parametersById` est une **Map**, pas un objet : il faut
+  `device.parametersById.get(paramId)`, jamais `parametersById[paramId]`
+  (qui renvoie silencieusement `undefined` — sections vides sans erreur).
+- Le CDN `cdn.cycling74.com` ne mirror pas forcément toutes les versions
+  de `rnbo.min.js`. Le kit essaie d'abord
+  `c74-public.nyc3.digitaloceanspaces.com` (utilisé par le template
+  d'export officiel de Cycling '74) puis se rabat sur `cdn.cycling74.com`.
+- Ce patch (v2) expose tous ses paramètres à plat au niveau du patcher
+  principal (`attack`, `drive_mix`, etc., sans préfixe). Une version
+  précédente les avait dans un sous-patcher polyphonique nommé "poly"
+  (paramId du type `poly/attack`) — si tu reviens à ce genre de
+  structure, la doc RNBO confirme que ce paramId unique pilote bien
+  toutes les voix à la fois tant que `@exposevoiceparams` n'est pas
+  activé sur le sous-patcher.

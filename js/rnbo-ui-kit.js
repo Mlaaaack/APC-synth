@@ -6,31 +6,44 @@
  * (patch.export.json). Pensé pour être copié tel quel d'un projet à
  * l'autre : seul le fichier de config (app.js) change.
  *
+ * Comportement : le patch est chargé et l'interface (sliders, sélecteur
+ * MIDI, clavier) est construite IMMÉDIATEMENT au chargement de la page,
+ * sans geste de l'utilisateur. Seul le son proprement dit reste en
+ * pause tant que l'utilisateur n'a pas cliqué sur le bouton ON/OFF —
+ * c'est une contrainte des navigateurs (AudioContext ne peut démarrer
+ * qu'après un geste utilisateur), pas un choix de design.
+ *
  * Pièges connus (déjà rencontrés sur d'autres projets RNBO) :
  * - device.parametersById est une Map, PAS un objet : on doit utiliser
- *   .get(paramId), jamais parametersById[paramId] (qui renvoie toujours
- *   undefined silencieusement, sans erreur visible dans la console).
- * - Un paramètre qui vit dans un sous-patcher a un paramId complet
- *   (ex: "poly/attack") différent de son nom court ("attack"). Il faut
- *   TOUJOURS adresser device.parametersById avec le paramId complet.
+ *   .get(paramId), jamais parametersById[paramId] (undefined silencieux).
+ * - Un paramètre qui vit dans un sous-patcher polyphonique a un paramId
+ *   du type "poly/xxx". D'après la doc RNBO ("Parameters and Polyphony"),
+ *   tant que le sous-patcher n'a pas @exposevoiceparams activé, CE
+ *   paramId unique pilote bien TOUTES les voix à la fois — c'est donc
+ *   la bonne adresse à utiliser (pas besoin d'un paramId par voix).
+ * - Le CDN "cdn.cycling74.com/rnbo/<version>/rnbo.min.js" ne mirror pas
+ *   forcément toutes les versions ; le bucket d'origine
+ *   "c74-public.nyc3.digitaloceanspaces.com/rnbo/<version>/rnbo.min.js"
+ *   (utilisé par le template d'export officiel) est plus fiable pour
+ *   charger une version précise — c'est celui qu'on utilise ici.
  * - Le transport RNBO (phasor~/metro @lock 1) ne démarre pas
- *   automatiquement dans le SDK web contrairement à l'éditeur Max :
- *   on envoie un TransportEvent "run" explicitement au démarrage.
+ *   automatiquement dans le SDK web : on envoie un TransportEvent "run"
+ *   explicitement.
  * -----------------------------------------------------------------------
  */
 
 export class RNBOUIKit {
   /**
    * @param {Object} opts
-   * @param {string} opts.patchUrl - chemin vers le patch.export.json
-   * @param {HTMLElement} opts.mount - conteneur où injecter l'interface
-   * @param {Array} opts.sections - description des sections/paramètres
+   * @param {string} opts.patchUrl
+   * @param {HTMLElement} opts.mount
+   * @param {Array} opts.sections
    * @param {string} [opts.rnboVersion]
    * @param {boolean} [opts.startTransport=true]
-   * @param {boolean} [opts.keyboard=true] - affiche un clavier de piano
-   * @param {number}  [opts.keyboardLowNote=48] - note MIDI la plus basse du clavier affiché
+   * @param {boolean} [opts.keyboard=true]
+   * @param {number}  [opts.keyboardLowNote=48]
    * @param {number}  [opts.keyboardOctaves=3]
-   * @param {boolean} [opts.midiInput=true] - affiche un sélecteur d'entrée MIDI (Web MIDI API)
+   * @param {boolean} [opts.midiInput=true]
    */
   constructor(opts) {
     this.patchUrl = opts.patchUrl;
@@ -46,75 +59,109 @@ export class RNBOUIKit {
     this.device = null;
     this._midiAccess = null;
     this._currentMidiInput = null;
-    this._activePointerNotes = new Map(); // pointerId -> pitch (pour le glissé sur le clavier)
+    this._activePointerNotes = new Map();
   }
 
-  async _loadRNBOScript(version) {
-    if (window.RNBO) return window.RNBO;
-    await new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = `https://cdn.cycling74.com/rnbo/${version}/rnbo.min.js`;
-      s.onload = resolve;
-      s.onerror = () => reject(new Error("Impossible de charger rnbo.min.js (" + version + ")"));
-      document.head.appendChild(s);
+  _loadRNBOScript(version) {
+    if (window.RNBO) return Promise.resolve(window.RNBO);
+    const urls = [
+      `https://c74-public.nyc3.digitaloceanspaces.com/rnbo/${encodeURIComponent(version)}/rnbo.min.js`,
+      `https://cdn.cycling74.com/rnbo/${encodeURIComponent(version)}/rnbo.min.js`,
+    ];
+    const tryLoad = (i) => new Promise((resolve, reject) => {
+      if (i >= urls.length) return reject(new Error("Impossible de charger rnbo.min.js (version " + version + ")"));
+      const el = document.createElement("script");
+      el.src = urls[i];
+      el.onload = () => resolve(window.RNBO);
+      el.onerror = () => { el.remove(); tryLoad(i + 1).then(resolve, reject); };
+      document.head.appendChild(el);
     });
-    return window.RNBO;
+    return tryLoad(0);
   }
 
   async init() {
     this._renderShell();
-    const startBtn = this.mount.querySelector("[data-rnbo-start]");
-    startBtn.addEventListener("click", () => this._start(), { once: true });
-  }
-
-  async _start() {
-    const statusEl = this.mount.querySelector("[data-rnbo-status]");
-    statusEl.textContent = "Chargement du patch…";
-
     try {
-      const res = await fetch(this.patchUrl);
-      if (!res.ok) throw new Error(`fetch ${this.patchUrl} → ${res.status}`);
-      const patcher = await res.json();
-      const version = this.rnboVersionOverride || patcher?.desc?.meta?.rnboversion || "latest";
-
-      const RNBO = await this._loadRNBOScript(version);
-
-      const WAContext = window.AudioContext || window.webkitAudioContext;
-      this.context = new WAContext();
-
-      this.device = await RNBO.createDevice({ context: this.context, patcher });
-      this.device.node.connect(this.context.destination);
-
-      if (this.context.state !== "running") {
-        await this.context.resume();
-      }
-
-      if (this.startTransport && RNBO.TransportEvent) {
-        this.device.scheduleEvent(new RNBO.TransportEvent(RNBO.TimeNow, "run"));
-      }
-
-      this._RNBO = RNBO;
-      statusEl.textContent = "Prêt";
-      this.mount.querySelector("[data-rnbo-start-wrap]").remove();
-      this._renderControls();
-      if (this.midiInputEnabled) await this._renderMidiInputSelector();
-      if (this.keyboard) this._renderKeyboard();
+      await this._boot();
     } catch (err) {
       console.error("[rnbo-ui-kit]", err);
-      statusEl.textContent = "Erreur au chargement : " + err.message;
+      this._setStatus("Erreur : " + err.message, true);
     }
+  }
+
+  async _boot() {
+    this._setStatus("Chargement du patch…");
+
+    const res = await fetch(this.patchUrl);
+    if (!res.ok) throw new Error(`fetch ${this.patchUrl} → ${res.status}`);
+    const patcher = await res.json();
+    const version = this.rnboVersionOverride || patcher?.desc?.meta?.rnboversion || "latest";
+
+    const RNBO = await this._loadRNBOScript(version);
+    this._RNBO = RNBO;
+
+    const WAContext = window.AudioContext || window.webkitAudioContext;
+    // Le contexte démarre "suspended" par défaut dans la plupart des
+    // navigateurs tant qu'aucun geste utilisateur n'a eu lieu — c'est
+    // volontaire, ça n'empêche pas de construire le device et l'UI.
+    this.context = new WAContext();
+
+    this.device = await RNBO.createDevice({ context: this.context, patcher });
+    this.device.node.connect(this.context.destination);
+
+    if (this.startTransport && RNBO.TransportEvent) {
+      this.device.scheduleEvent(new RNBO.TransportEvent(RNBO.TimeNow, "run"));
+    }
+
+    this._setStatus("");
+    this._renderPowerButton();
+    this._renderControls();
+    if (this.midiInputEnabled) await this._renderMidiInputSelector();
+    if (this.keyboard) this._renderKeyboard();
   }
 
   _renderShell() {
     this.mount.innerHTML = `
-      <div class="rnbo-start-wrap" data-rnbo-start-wrap>
-        <button class="rnbo-start-btn" data-rnbo-start type="button">▶ Démarrer l'audio</button>
-        <p class="rnbo-status" data-rnbo-status>En attente…</p>
+      <div class="rnbo-topbar">
+        <p class="rnbo-status" data-rnbo-status></p>
+        <div data-rnbo-power></div>
       </div>
       <div class="rnbo-sections" data-rnbo-sections></div>
       <div class="rnbo-midi-select" data-rnbo-midi-select></div>
       <div class="rnbo-keyboard" data-rnbo-keyboard></div>
     `;
+  }
+
+  _setStatus(text, isError) {
+    const el = this.mount.querySelector("[data-rnbo-status]");
+    el.textContent = text;
+    el.classList.toggle("rnbo-status-error", !!isError);
+  }
+
+  // -----------------------------------------------------------------
+  // Bouton ON/OFF (seul geste utilisateur requis, pour l'AudioContext)
+  // -----------------------------------------------------------------
+
+  _renderPowerButton() {
+    const wrap = this.mount.querySelector("[data-rnbo-power]");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "rnbo-power-btn";
+    const setLabel = () => {
+      const on = this.context.state === "running";
+      btn.textContent = on ? "⏻ ON" : "⏻ OFF";
+      btn.classList.toggle("is-on", on);
+    };
+    setLabel();
+    btn.addEventListener("click", async () => {
+      if (this.context.state === "running") {
+        await this.context.suspend();
+      } else {
+        await this.context.resume();
+      }
+      setLabel();
+    });
+    wrap.appendChild(btn);
   }
 
   // -----------------------------------------------------------------
@@ -227,8 +274,10 @@ export class RNBOUIKit {
     el.innerHTML = `
       <label for="rnbo-midi-device">Entrée MIDI</label>
       <select id="rnbo-midi-device"></select>
+      <button type="button" class="rnbo-midi-refresh" title="Actualiser la liste (si tu viens de brancher un clavier)">↻</button>
     `;
     const select = el.querySelector("select");
+    const refreshBtn = el.querySelector(".rnbo-midi-refresh");
 
     const populate = () => {
       const current = select.value;
@@ -246,6 +295,17 @@ export class RNBOUIKit {
 
     populate();
     this._midiAccess.onstatechange = populate;
+
+    refreshBtn.addEventListener("click", async () => {
+      // Re-demande l'accès MIDI : sur certains navigateurs/OS, un
+      // périphérique branché après coup n'apparaît pas tant qu'on n'a
+      // pas rafraîchi l'accès, malgré onstatechange.
+      try {
+        this._midiAccess = await navigator.requestMIDIAccess({ sysex: false });
+        this._midiAccess.onstatechange = populate;
+      } catch (e) { /* garde l'accès précédent si ça échoue */ }
+      populate();
+    });
 
     select.addEventListener("change", () => {
       if (this._currentMidiInput) {
@@ -279,10 +339,10 @@ export class RNBOUIKit {
 
   _buildPianoSVG(lowNote, octaves) {
     const whiteKeyW = 40, whiteKeyH = 160, blackKeyW = 24, blackKeyH = 100;
-    const whiteOffsetsInOctave = [0, 2, 4, 5, 7, 9, 11]; // do ré mi fa sol la si
-    const blackOffsetsInOctave = [1, 3, null, 6, 8, 10, null]; // do# ré# _ fa# sol# la# _
+    const whiteOffsetsInOctave = [0, 2, 4, 5, 7, 9, 11];
+    const blackOffsetsInOctave = [1, 3, null, 6, 8, 10, null];
 
-    const totalWhiteKeys = octaves * 7 + 1; // +1 pour boucler sur le do final
+    const totalWhiteKeys = octaves * 7 + 1;
     const svgW = totalWhiteKeys * whiteKeyW;
 
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -329,7 +389,6 @@ export class RNBOUIKit {
         }
       });
     }
-    // les noires par-dessus les blanches, dans l'ordre du DOM
     blackKeys.forEach((k) => svg.appendChild(k));
 
     const allKeys = [...whiteKeys, ...blackKeys];
@@ -340,7 +399,7 @@ export class RNBOUIKit {
       return null;
     };
 
-    const onDown = (pointerId, pitch, clientX, clientY) => {
+    const onDown = (pointerId, pitch) => {
       this._activePointerNotes.set(pointerId, pitch);
       this._noteOn(pitch);
       this._markKeyActive(svg, pitch, true);
@@ -369,7 +428,7 @@ export class RNBOUIKit {
     allKeys.forEach((key) => {
       key.addEventListener("pointerdown", (e) => {
         e.preventDefault();
-        onDown(e.pointerId, Number(key.dataset.pitch), e.clientX, e.clientY);
+        onDown(e.pointerId, Number(key.dataset.pitch));
       });
     });
     svg.addEventListener("pointermove", (e) => onMove(e.pointerId, e.clientX, e.clientY));
